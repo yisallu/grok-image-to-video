@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Grok 图生视频 — 设置</title>
+  <style>
+    body {
+      font: 14px/1.6 -apple-system, "Segoe UI", system-ui, sans-serif;
+      margin: 0;
+      padding: 24px;
+      width: 440px;
+      color: #1a1a1a;
+      background: #fafafa;
+    }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .sub { color: #666; font-size: 12px; margin-bottom: 20px; }
+    label { display: block; font-weight: 600; margin: 16px 0 6px; }
+    input[type="text"], input[type="password"], input[type="number"], select, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font: inherit;
+      background: #fff;
+    }
+    textarea { resize: vertical; min-height: 72px; }
+    .hint { color: #888; font-size: 12px; margin-top: 4px; }
+    .row { display: flex; gap: 12px; }
+    .row > div { flex: 1; }
+    button {
+      margin-top: 20px;
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      background: #111;
+      color: #fff;
+      font: 600 14px inherit;
+      cursor: pointer;
+    }
+    button:hover { background: #333; }
+    button.secondary { background: #e8e8e8; color: #111; margin-top: 10px; }
+    .histrow { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+    .histrow select { flex: 1; }
+    .histrow button { margin-top: 0; width: auto; padding: 8px 12px; white-space: nowrap; }
+    #status { margin-top: 12px; font-size: 13px; min-height: 18px; }
+    .ok { color: #0a7d28; }
+    .err { color: #b00020; }
+    a { color: #1a6dd4; }
+  </style>
+</head>
+<body>
+  <h1>Grok 图生视频</h1>
+  <div class="sub">网页上 <b>Alt + 左键点击</b> 任意图片即可生成视频,完成后原位替换。双击生成的视频可还原原图。</div>
+
+  <label for="endpoint">代理地址(Endpoint)</label>
+  <input type="text" id="endpoint" placeholder="https://your-proxy.example.com/i2v" />
+  <div class="hint">VPS 上的图生视频代理,复用你的 xAI OAuth 订阅额度。</div>
+
+  <label for="secret">访问密钥(Secret)</label>
+  <input type="password" id="secret" placeholder="Bearer 密钥" autocomplete="off" />
+  <div class="hint">与服务端 <code>/etc/grok-i2v/env</code> 里的 <code>I2V_SECRET</code> 一致。仅本地保存。</div>
+
+  <div class="row">
+    <div>
+      <label for="duration">时长(秒)</label>
+      <input type="number" id="duration" min="1" max="15" step="1" />
+      <div class="hint">1–15 秒</div>
+    </div>
+    <div>
+      <label for="resolution">画质</label>
+      <select id="resolution">
+        <option value="480p">480p 流畅</option>
+        <option value="720p">720p 高清</option>
+      </select>
+      <div class="hint">xAI 仅支持 480p/720p</div>
+    </div>
+    <div>
+      <label for="aspectRatio">比例</label>
+      <select id="aspectRatio">
+        <option value="auto">按原图</option>
+        <option value="16:9">16:9 横屏</option>
+        <option value="9:16">9:16 竖屏</option>
+        <option value="1:1">1:1 方形</option>
+        <option value="4:3">4:3</option>
+        <option value="3:4">3:4</option>
+        <option value="3:2">3:2</option>
+        <option value="2:3">2:3</option>
+      </select>
+    </div>
+  </div>
+
+  <label for="concurrency">同时生成数(并发)</label>
+  <input type="number" id="concurrency" min="1" max="10" step="1" />
+  <div class="hint">点多张图时最多同时跑几个,其余自动排队。默认 3;太高易触发 xAI 限流。</div>
+
+  <label for="prompt">提示词(Prompt)</label>
+  <div class="histrow">
+    <select id="promptHistory">
+      <option value="">— 历史提示词(选择后填入)—</option>
+    </select>
+    <button id="delHistory" class="secondary" type="button">删除此条</button>
+  </div>
+  <textarea id="prompt" placeholder="留空 = 使用内置默认(保留主体/构图/颜色,轻微自然运动)"></textarea>
+  <div class="hint">留空则用内置默认。每次保存非空提示词会自动加入上方历史,最多保留 20 条。</div>
+
+  <button id="save">保存设置</button>
+  <button id="test" class="secondary">测试连接</button>
+  <div id="status"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>
