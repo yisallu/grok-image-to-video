@@ -245,4 +245,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true;
   }
+  if (msg?.type === "FETCH_VIDEO") {
+    // 后台抓视频字节(SW 有 <all_urls>,不受 CORS 限制),供内容脚本走 blob: 抓帧
+    (async () => {
+      try {
+        const r = await fetch(msg.url);
+        if (!r.ok) throw new Error(`视频下载失败 (${r.status})`);
+        const buf = await r.arrayBuffer();
+        if (buf.byteLength > 25 * 1024 * 1024) throw new Error("视频过大(>25MB)");
+        const mime = r.headers.get("content-type") || "video/mp4";
+        sendResponse({ ok: true, b64: bytesToB64(buf), mime });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e.message || e) });
+      }
+    })();
+    return true;
+  }
 });

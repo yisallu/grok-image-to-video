@@ -25,7 +25,7 @@ function makeOverlay(img) {
   };
 }
 
-function replaceWithVideo(img, url) {
+function replaceWithVideo(el, url) {
   const video = document.createElement("video");
   video.src = url;
   video.autoplay = true;
@@ -33,27 +33,29 @@ function replaceWithVideo(img, url) {
   video.muted = true;
   video.controls = true;
   video.playsInline = true;
-  video.className = img.className;
+  video.className = el.className;
   video.setAttribute("data-grok-i2v", "1");
 
-  const cs = window.getComputedStyle(img);
-  if (img.width) video.width = img.width;
-  if (img.height) video.height = img.height;
-  video.style.cssText = img.style.cssText;
+  const cs = window.getComputedStyle(el);
+  const w = el.clientWidth || el.width || 0;
+  const h = el.clientHeight || el.height || 0;
+  if (w) video.width = w;
+  if (h) video.height = h;
+  video.style.cssText = el.style.cssText;
   video.style.maxWidth = cs.maxWidth;
   video.style.objectFit = "cover";
 
-  const originalSrc = img.currentSrc || img.src;
-  video.title = "Grok 生成视频 — 双击还原原图";
+  // 克隆原元素(img 或 video)用于双击还原
+  const clone = el.cloneNode(true);
+  if (el instanceof HTMLImageElement) clone.src = el.currentSrc || el.src;
+  video.title = "Grok 生成视频 — 双击还原";
   video.addEventListener("dblclick", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const restored = img.cloneNode(true);
-    restored.src = originalSrc;
-    video.replaceWith(restored);
+    video.replaceWith(clone);
   });
 
-  img.replaceWith(video);
+  el.replaceWith(video);
 }
 
 function notifyError(img, message) {
@@ -91,6 +93,62 @@ function extractViaCanvas(img, maxSide = 1280) {
   }
 }
 
+// 把 video 元素的当前帧画成 JPEG data URI(同源/blob: 不会污染,跨域会抛 SecurityError)
+function frameFromVideoElement(videoEl, maxSide = 1280) {
+  const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+  if (!vw || !vh) throw new Error("视频还没加载出画面");
+  const scale = Math.min(1, maxSide / Math.max(vw, vh));
+  const w = Math.max(1, Math.round(vw * scale));
+  const h = Math.max(1, Math.round(vh * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(videoEl, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", 0.92); // 跨域污染时抛错
+}
+
+// 跨域视频:后台抓字节 → blob:(同源)→ 隐藏 video → seek 到该时刻 → 抓帧(不污染)
+async function captureViaBlob(url, time) {
+  const res = await chrome.runtime.sendMessage({ type: "FETCH_VIDEO", url });
+  if (!res || !res.ok) throw new Error(res?.error || "无法获取视频数据");
+  const bytes = Uint8Array.from(atob(res.b64), (c) => c.charCodeAt(0));
+  const blobUrl = URL.createObjectURL(new Blob([bytes], { type: res.mime || "video/mp4" }));
+  const v = document.createElement("video");
+  v.muted = true;
+  v.playsInline = true;
+  v.preload = "auto";
+  v.src = blobUrl;
+  try {
+    await new Promise((resolve, reject) => {
+      v.onloadeddata = resolve;
+      v.onerror = () => reject(new Error("视频解码失败"));
+      setTimeout(() => reject(new Error("视频加载超时")), 30000);
+    });
+    await new Promise((resolve) => {
+      v.onseeked = resolve;
+      v.currentTime = Math.max(0, Math.min(time || 0, (v.duration || 0) - 0.05 || 0));
+      setTimeout(resolve, 3000); // 兜底:某些视频不触发 seeked
+    });
+    return frameFromVideoElement(v);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+// 抓取 video 当前帧:先直接抓,跨域污染则走后台 blob 方案
+async function captureVideoFrame(videoEl) {
+  try { videoEl.pause(); } catch (_) {}
+  const t = videoEl.currentTime || 0;
+  try {
+    return frameFromVideoElement(videoEl); // 同源/blob: 直接成功
+  } catch (_) {
+    const src = videoEl.currentSrc || videoEl.src || "";
+    if (/^https?:/.test(src)) return await captureViaBlob(src, t);
+    throw new Error("该视频是流式/受保护内容(如 blob/MSE/DRM),无法抓取当前帧");
+  }
+}
+
 // 取号:并发未满立即拿到 token,否则排队轮询(由 background 跨标签页统一计数)
 async function acquireSlot(overlay) {
   const start = Date.now();
@@ -109,25 +167,36 @@ async function acquireSlot(overlay) {
   throw new Error("排队超时");
 }
 
-async function triggerGenerate(img) {
-  const src = img.currentSrc || img.src;
-  if (!src) { alert("无法获取图片地址"); return; }
+async function triggerGenerate(el) {
+  const isVideo = el instanceof HTMLVideoElement;
+  const src = el.currentSrc || el.src;
+  if (!src && !isVideo) { alert("无法获取图片地址"); return; }
 
-  const overlay = makeOverlay(img);
+  const overlay = makeOverlay(el);
   let token = null;
   try {
     overlay.setText("排队中…");
     token = await acquireSlot(overlay); // 并发上限/排队
 
-    overlay.setText("准备图片 / 提交任务…");
-    const imageDataUri = extractViaCanvas(img); // 本地/同源图直接取;跨域返回 null
+    // 取源图:视频抓当前帧,图片用 canvas 直取(跨域返回 null 由后台抓)
+    let imageDataUri, natW, natH;
+    if (isVideo) {
+      overlay.setText("抓取当前帧…");
+      imageDataUri = await captureVideoFrame(el); // 失败则进 catch
+      natW = el.videoWidth; natH = el.videoHeight;
+    } else {
+      imageDataUri = extractViaCanvas(el);
+      natW = el.naturalWidth || el.width; natH = el.naturalHeight || el.height;
+    }
+
+    overlay.setText("提交任务…");
     const sub = await chrome.runtime.sendMessage({
       type: "SUBMIT",
       src,
       pageUrl: location.href,
       imageDataUri,
-      naturalWidth: img.naturalWidth || img.width,
-      naturalHeight: img.naturalHeight || img.height,
+      naturalWidth: natW,
+      naturalHeight: natH,
     });
     if (!sub) throw new Error("扩展无响应");
     if (!sub.ok) throw new Error(sub.error);
@@ -149,7 +218,7 @@ async function triggerGenerate(img) {
       const d = poll.data;
       if (d.status === "done" && d.video_url) {
         overlay.remove();
-        replaceWithVideo(img, d.video_url);
+        replaceWithVideo(el, d.video_url);
         return;
       }
       if (["failed", "error", "expired", "cancelled"].includes(d.status)) {
@@ -160,7 +229,7 @@ async function triggerGenerate(img) {
     throw new Error("生成超时(6 分钟)");
   } catch (err) {
     overlay.remove();
-    notifyError(img, String(err.message || err));
+    notifyError(el, String(err.message || err));
   } finally {
     if (token) {
       try { chrome.runtime.sendMessage({ type: "RELEASE", token }); } catch {}
@@ -168,13 +237,14 @@ async function triggerGenerate(img) {
   }
 }
 
-// Alt+左键点击图片(捕获阶段,优先于页面自身处理)
+// Alt+左键点击图片或视频(捕获阶段,优先于页面自身处理)
+// 视频:先暂停到想要的帧,再 Alt+点击,即以当前帧为源图生成
 document.addEventListener(
   "click",
   (e) => {
     if (!e.altKey || e.button !== 0) return;
     const target = e.target;
-    if (!(target instanceof HTMLImageElement)) return;
+    if (!(target instanceof HTMLImageElement) && !(target instanceof HTMLVideoElement)) return;
     e.preventDefault();
     e.stopPropagation();
     triggerGenerate(target);
