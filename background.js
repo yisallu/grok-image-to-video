@@ -245,6 +245,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true;
   }
+  if (msg?.type === "CAPTURE_TAB") {
+    // 截当前可见标签页(渲染像素,绕开 file:///跨域/canvas 污染);需 <all_urls> 主机权限
+    const windowId = sender.tab?.windowId;
+    const cap = windowId != null
+      ? chrome.tabs.captureVisibleTab(windowId, { format: "png" })
+      : chrome.tabs.captureVisibleTab({ format: "png" });
+    cap.then((dataUrl) => sendResponse({ ok: true, dataUrl }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
   if (msg?.type === "FETCH_VIDEO") {
     // 后台抓视频字节(SW 有 <all_urls>,不受 CORS 限制),供内容脚本走 blob: 抓帧
     (async () => {
