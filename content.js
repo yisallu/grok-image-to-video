@@ -237,7 +237,10 @@ async function captureVisibleElement(el, maxSide = 1280) {
   }
 }
 
-// 抓取 video 当前帧:① 直接画;② 跨域/本地走 blob(全质量);③ 截屏裁剪(通用兜底)
+// 抓取 video 当前帧:
+// ① 直接画原元素(同源 http / blob:,全质量);
+// ② 跨域 http(s):后台抓字节 → blob → seek 抓帧(全质量,无需可见);
+// ③ 本地 file:// 等无法读字节、canvas 必污染的源:隐藏原生控件 → 截当前可见画面 → 裁剪(画面干净)。
 async function captureVideoFrame(videoEl) {
   try { videoEl.pause(); } catch (_) {}
   const t = videoEl.currentTime || 0;
@@ -246,53 +249,10 @@ async function captureVideoFrame(videoEl) {
   } catch (_) {}
   const src = videoEl.currentSrc || videoEl.src || "";
   if (/^https?:/.test(src)) {
-    return await captureViaBlob(src, t); // 跨域:后台抓字节 → blob → seek(全质量)
+    try { return await captureViaBlob(src, t); } catch (_) {} // 跨域:后台抓字节 blob 抓帧
   }
-  // 本地 file:// 视频在点击处已走"选文件"流程,不会到这
-  throw new Error("无法抓取该视频的当前帧");
-}
-
-// 从用户选中的视频文件离屏抓帧(全分辨率、无任何控件/UI;blob: 同源不污染)
-async function captureFrameFromFile(file, time) {
-  const blobUrl = URL.createObjectURL(file);
-  const v = document.createElement("video");
-  v.muted = true;
-  v.playsInline = true;
-  v.preload = "auto";
-  v.src = blobUrl;
-  try {
-    await new Promise((resolve, reject) => {
-      v.onloadeddata = resolve;
-      v.onerror = () => reject(new Error("视频解码失败(文件可能不是视频或格式不支持)"));
-      setTimeout(() => reject(new Error("视频加载超时")), 30000);
-    });
-    await new Promise((resolve) => {
-      v.onseeked = resolve;
-      v.currentTime = Math.max(0, Math.min(time || 0, (v.duration || 0) - 0.05 || 0));
-      setTimeout(resolve, 3000); // 兜底:个别视频不触发 seeked
-    });
-    return { dataUri: frameFromVideoElement(v), w: v.videoWidth, h: v.videoHeight };
-  } finally {
-    URL.revokeObjectURL(blobUrl);
-  }
-}
-
-// 本地视频:浏览器读不到帧字节,在用户手势内弹文件选择器,选中后离屏抓帧再生成
-function promptLocalVideoCapture(videoEl) {
-  try { videoEl.pause(); } catch (_) {}
-  const time = videoEl.currentTime || 0;
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = "video/*";
-  input.style.display = "none";
-  document.body.appendChild(input);
-  input.addEventListener("change", () => {
-    const file = input.files && input.files[0];
-    input.remove();
-    if (!file) return;
-    triggerGenerate(videoEl, () => captureFrameFromFile(file, time));
-  });
-  input.click(); // 必须在手势内同步调用,否则文件框会被浏览器拦截
+  // 本地视频:Chrome 禁止读其帧字节、canvas 必污染 → 截图裁剪是唯一干净方案(已隐藏控件)
+  return await captureVisibleElement(videoEl);
 }
 
 // 取号:并发未满立即拿到 token,否则排队轮询(由 background 跨标签页统一计数)
@@ -437,11 +397,6 @@ document.addEventListener(
     if (!el) return;
     e.preventDefault();
     e.stopPropagation();
-    // 本地视频:浏览器读不到帧字节,改为(在点击手势内)弹文件选择器,保证全质量、零 UI
-    if (el instanceof HTMLVideoElement && /^file:/.test(el.currentSrc || el.src || "")) {
-      promptLocalVideoCapture(el);
-      return;
-    }
     triggerGenerate(el);
   },
   true
