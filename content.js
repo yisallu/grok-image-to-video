@@ -281,29 +281,49 @@ async function triggerGenerate(el) {
   }
 }
 
-// 在点击坐标的元素栈里找真正的图/视频(穿透抖音等站点盖在图上的透明覆盖层)
-function findMediaUnderPoint(x, y) {
-  const stack = document.elementsFromPoint(x, y);
-  for (const n of stack) {
-    if (n instanceof HTMLImageElement || n instanceof HTMLVideoElement) return n;
+// 占位/模糊层等"假图"特征(抖音图文会把 noop.jpeg 占位层叠在真图 webp 上)
+const PLACEHOLDER_RE = /noop|placeholder|blank|loading|spacer|1x1|transparent/i;
+
+// 选出点击点下"真正在看的那张"媒体:必须覆盖点击点、可见、非占位,
+// 排序 非占位 → 最不透明 → 面积最大。解决:① 透明覆盖层挡住真图;
+// ② 抖音图文把占位层叠在真图上;③ 多图轮播多张叠放时抓错图(只有当前居中那张覆盖点击点)。
+function pickMediaAtPoint(x, y, target) {
+  // 快路径:点击目标本身就是非占位的图/视频
+  if (target instanceof HTMLImageElement || target instanceof HTMLVideoElement) {
+    const s = (target.currentSrc || target.src || "").toLowerCase();
+    if (!PLACEHOLDER_RE.test(s)) return target;
   }
-  for (const n of stack) {
-    const m = n.querySelector && n.querySelector("img, video");
-    if (m) return m;
-  }
-  return null;
+  const seen = new Set();
+  const cands = [];
+  const consider = (n) => {
+    if (seen.has(n)) return;
+    seen.add(n);
+    if (!(n instanceof HTMLImageElement) && !(n instanceof HTMLVideoElement)) return;
+    const r = n.getBoundingClientRect();
+    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return; // 必须覆盖点击点
+    if (r.width < 40 || r.height < 40) return;
+    const cs = getComputedStyle(n);
+    if (cs.visibility === "hidden" || cs.display === "none") return;
+    const op = parseFloat(cs.opacity);
+    if (op < 0.05) return;
+    const src = (n.currentSrc || n.src || "").toLowerCase();
+    cands.push({ el: n, ph: PLACEHOLDER_RE.test(src) ? 1 : 0, op, area: r.width * r.height });
+  };
+  document.elementsFromPoint(x, y).forEach(consider);
+  document.querySelectorAll("img, video").forEach(consider);
+  cands.sort((a, b) => (a.ph - b.ph) || (b.op - a.op) || (b.area - a.area));
+  if (cands.length) return cands[0].el;
+  return (target instanceof HTMLImageElement || target instanceof HTMLVideoElement) ? target : null;
 }
 
 // Alt+左键点击图片或视频(捕获阶段,优先于页面自身处理)
+// 多图轮播:切到想要的那张再 Alt+点击,抓的就是当前居中显示的那张
 // 视频:先暂停到想要的帧,再 Alt+点击,即以当前帧为源图生成
 document.addEventListener(
   "click",
   (e) => {
     if (!e.altKey || e.button !== 0) return;
-    let el = e.target;
-    if (!(el instanceof HTMLImageElement) && !(el instanceof HTMLVideoElement)) {
-      el = findMediaUnderPoint(e.clientX, e.clientY); // 命中覆盖层时穿透找真图/视频
-    }
+    const el = pickMediaAtPoint(e.clientX, e.clientY, e.target);
     if (!el) return;
     e.preventDefault();
     e.stopPropagation();
