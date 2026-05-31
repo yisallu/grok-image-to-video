@@ -93,6 +93,35 @@ function extractViaCanvas(img, maxSide = 1280) {
   }
 }
 
+// 图片 → JPEG data URI:① 直接画(同源/CORS-clean);② 跨域但 CDN 带 CORS(如抖音
+// douyinpic):内容脚本 fetch → blob → ImageBitmap → 重画(不污染)。都失败返回 null,
+// 由后台/服务端按 image_url+referer 兜底抓取。
+async function imageToDataUri(img, maxSide = 1280) {
+  const direct = extractViaCanvas(img, maxSide);
+  if (direct) return direct;
+  const src = img.currentSrc || img.src || "";
+  if (!/^https?:/.test(src)) return null;
+  try {
+    const r = await fetch(src); // 内容脚本以页面身份抓,CDN 带 CORS 即可读
+    if (!r.ok) return null;
+    const bmp = await createImageBitmap(await r.blob());
+    const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bmp, 0, 0, w, h);
+    if (bmp.close) bmp.close();
+    return c.toDataURL("image/jpeg", 0.92);
+  } catch (_) {
+    return null;
+  }
+}
+
 // 把 video 元素的当前帧画成 JPEG data URI(同源/blob: 不会污染,跨域会抛 SecurityError)
 function frameFromVideoElement(videoEl, maxSide = 1280) {
   const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
@@ -108,12 +137,27 @@ function frameFromVideoElement(videoEl, maxSide = 1280) {
   return canvas.toDataURL("image/jpeg", 0.92); // 跨域污染时抛错
 }
 
-// 跨域视频:后台抓字节 → blob:(同源)→ 隐藏 video → seek 到该时刻 → 抓帧(不污染)
-async function captureViaBlob(url, time) {
-  const res = await chrome.runtime.sendMessage({ type: "FETCH_VIDEO", url });
+// 拿到视频 blob:本地 file:// 由内容脚本同源抓;跨域 http(s) 由后台抓(SW 不受 CORS)
+async function fetchVideoBlob(src) {
+  if (/^file:/.test(src)) {
+    let r;
+    try {
+      r = await fetch(src); // 同源读取本地文件
+    } catch (_) {
+      throw new Error("无法读取本地视频。请在 扩展「详细信息」→ 打开「允许访问文件网址」后重试。");
+    }
+    if (!r.ok) throw new Error(`本地视频读取失败 (${r.status})`);
+    return await r.blob();
+  }
+  const res = await chrome.runtime.sendMessage({ type: "FETCH_VIDEO", url: src });
   if (!res || !res.ok) throw new Error(res?.error || "无法获取视频数据");
   const bytes = Uint8Array.from(atob(res.b64), (c) => c.charCodeAt(0));
-  const blobUrl = URL.createObjectURL(new Blob([bytes], { type: res.mime || "video/mp4" }));
+  return new Blob([bytes], { type: res.mime || "video/mp4" });
+}
+
+// blob:(同源,不污染)→ 隐藏 video → seek 到该时刻 → 抓帧
+async function captureViaBlob(src, time) {
+  const blobUrl = URL.createObjectURL(await fetchVideoBlob(src));
   const v = document.createElement("video");
   v.muted = true;
   v.playsInline = true;
@@ -144,7 +188,7 @@ async function captureVideoFrame(videoEl) {
     return frameFromVideoElement(videoEl); // 同源/blob: 直接成功
   } catch (_) {
     const src = videoEl.currentSrc || videoEl.src || "";
-    if (/^https?:/.test(src)) return await captureViaBlob(src, t);
+    if (/^https?:/.test(src) || /^file:/.test(src)) return await captureViaBlob(src, t);
     throw new Error("该视频是流式/受保护内容(如 blob/MSE/DRM),无法抓取当前帧");
   }
 }
@@ -185,7 +229,7 @@ async function triggerGenerate(el) {
       imageDataUri = await captureVideoFrame(el); // 失败则进 catch
       natW = el.videoWidth; natH = el.videoHeight;
     } else {
-      imageDataUri = extractViaCanvas(el);
+      imageDataUri = await imageToDataUri(el); // 含跨域 CORS CDN(抖音等)兜底
       natW = el.naturalWidth || el.width; natH = el.naturalHeight || el.height;
     }
 
@@ -237,17 +281,33 @@ async function triggerGenerate(el) {
   }
 }
 
+// 在点击坐标的元素栈里找真正的图/视频(穿透抖音等站点盖在图上的透明覆盖层)
+function findMediaUnderPoint(x, y) {
+  const stack = document.elementsFromPoint(x, y);
+  for (const n of stack) {
+    if (n instanceof HTMLImageElement || n instanceof HTMLVideoElement) return n;
+  }
+  for (const n of stack) {
+    const m = n.querySelector && n.querySelector("img, video");
+    if (m) return m;
+  }
+  return null;
+}
+
 // Alt+左键点击图片或视频(捕获阶段,优先于页面自身处理)
 // 视频:先暂停到想要的帧,再 Alt+点击,即以当前帧为源图生成
 document.addEventListener(
   "click",
   (e) => {
     if (!e.altKey || e.button !== 0) return;
-    const target = e.target;
-    if (!(target instanceof HTMLImageElement) && !(target instanceof HTMLVideoElement)) return;
+    let el = e.target;
+    if (!(el instanceof HTMLImageElement) && !(el instanceof HTMLVideoElement)) {
+      el = findMediaUnderPoint(e.clientX, e.clientY); // 命中覆盖层时穿透找真图/视频
+    }
+    if (!el) return;
     e.preventDefault();
     e.stopPropagation();
-    triggerGenerate(target);
+    triggerGenerate(el);
   },
   true
 );
