@@ -1,9 +1,5 @@
-// content.js — Alt+左键点击图片 → 提交生成 → 轮询 → 原位替换为视频。
-// 轮询由内容脚本驱动(页面常驻),每次只发短请求,生成全程不依赖单个长连接。
-
-const POLL_INTERVAL_MS = 5000;
-const POLL_TIMEOUT_MS = 360000; // 6 分钟
-const QUEUE_TIMEOUT_MS = 900000; // 排队最长等待 15 分钟
+// content.js — Alt+左键点击图片/视频 → 在原页面"抓图"(短暂遮罩)→ 交给 background
+// 打开扩展进度页(新标签),排队/提交/轮询/进度/结果全部在新标签里完成。
 
 function makeOverlay(img) {
   const rect = img.getBoundingClientRect();
@@ -36,7 +32,6 @@ function notifyError(img, message) {
   setTimeout(() => tip.remove(), 8000);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 直接从已加载的 <img> 用 canvas 取图并转 JPEG data URI。
 // 适用于本地 file:// 图、同源图;跨域无 CORS 的图会污染 canvas → 返回 null 走后台抓取。
@@ -222,39 +217,17 @@ async function captureVideoFrame(videoEl) {
   return await captureVisibleElement(videoEl);
 }
 
-// 取号:并发未满立即拿到 token,否则排队轮询(由 background 跨标签页统一计数)
-async function acquireSlot(overlay) {
-  const start = Date.now();
-  while (Date.now() - start < QUEUE_TIMEOUT_MS) {
-    let res;
-    try {
-      res = await chrome.runtime.sendMessage({ type: "TRY_ACQUIRE" });
-    } catch {
-      res = null;
-    }
-    if (res && res.granted) return res.token;
-    if (res && res.limit) overlay.setText(`排队中…(${res.active}/${res.limit} 进行中)`);
-    else overlay.setText("排队中…");
-    await sleep(1500);
-  }
-  throw new Error("排队超时");
-}
-
+// content 只负责"抓图"(canvas/视频帧/截屏都依赖原页面 DOM),抓完把任务交给 background:
+// background 打开扩展内置进度页(新标签),排队/提交/轮询/进度/结果全在新标签里完成。
 async function triggerGenerate(el, capture) {
   const isVideo = el instanceof HTMLVideoElement;
   const src = el.currentSrc || el.src;
   if (!src && !isVideo && !capture) { alert("无法获取图片地址"); return; }
 
   const overlay = makeOverlay(el);
-  let token = null;
   try {
-    overlay.setText("排队中…");
-    token = await acquireSlot(overlay); // 并发上限/排队
-
-    // 取源图
     let imageDataUri, natW, natH;
     if (capture) {
-      // 外部抓帧(本地视频:选文件后离屏抓帧,全分辨率、零 UI)
       overlay.setText("抓取当前帧…");
       const r = await capture();
       imageDataUri = r.dataUri; natW = r.w; natH = r.h;
@@ -263,6 +236,7 @@ async function triggerGenerate(el, capture) {
       imageDataUri = await captureVideoFrame(el);
       natW = el.videoWidth; natH = el.videoHeight;
     } else {
+      overlay.setText("抓取图片…");
       imageDataUri = await imageToDataUri(el); // 含跨域 CORS CDN(抖音等)兜底
       if (!imageDataUri) {
         try { imageDataUri = await captureVisibleElement(el); } catch (_) {} // 本地图/受保护图:截屏裁剪
@@ -270,52 +244,21 @@ async function triggerGenerate(el, capture) {
       natW = el.naturalWidth || el.width; natH = el.naturalHeight || el.height;
     }
 
-    overlay.setText("提交任务…");
-    const sub = await chrome.runtime.sendMessage({
-      type: "SUBMIT",
-      src,
-      pageUrl: location.href,
-      imageDataUri,
-      naturalWidth: natW,
-      naturalHeight: natH,
+    // 交给 background 开进度页;进度与结果都在新标签里
+    await chrome.runtime.sendMessage({
+      type: "START_JOB",
+      job: {
+        src,
+        pageUrl: location.href,
+        imageDataUri,
+        naturalWidth: natW,
+        naturalHeight: natH,
+      },
     });
-    if (!sub) throw new Error("扩展无响应");
-    if (!sub.ok) throw new Error(sub.error);
-
-    const requestId = sub.request_id;
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < POLL_TIMEOUT_MS) {
-      await sleep(POLL_INTERVAL_MS);
-      const secs = Math.round((Date.now() - startedAt) / 1000);
-      overlay.setText(`Grok 正在生成视频… ${secs}s`);
-
-      let poll;
-      try {
-        poll = await chrome.runtime.sendMessage({ type: "POLL", request_id: requestId });
-      } catch {
-        continue; // service worker 偶发休眠/重启,下次再试
-      }
-      if (!poll || !poll.ok) continue;
-      const d = poll.data;
-      if (d.status === "done" && d.video_url) {
-        overlay.remove();
-        // 在新标签页打开生成的视频(不再原位替换)
-        try { chrome.runtime.sendMessage({ type: "OPEN_TAB", url: d.video_url }); } catch (_) {}
-        return;
-      }
-      if (["failed", "error", "expired", "cancelled"].includes(d.status)) {
-        throw new Error(d.error || `状态 ${d.status}`);
-      }
-      // processing / queued → 继续
-    }
-    throw new Error("生成超时(6 分钟)");
+    overlay.remove(); // 原页面遮罩用完即撤,转圈交给新标签
   } catch (err) {
     overlay.remove();
     notifyError(el, String(err.message || err));
-  } finally {
-    if (token) {
-      try { chrome.runtime.sendMessage({ type: "RELEASE", token }); } catch {}
-    }
   }
 }
 

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Grok 图生视频 (Alt+点击)",
   "version": "1.0.0",
-  "description": "Alt+左键点击网页任意图片,调用 xAI Grok 图生视频,并在原位替换为生成的视频。",
+  "description": "Alt+左键点击网页任意图片/视频帧,调用 xAI Grok 图生视频,在新标签页显示进度并打开生成的视频。",
   "permissions": ["storage", "notifications", "declarativeNetRequest"],
   "host_permissions": ["<all_urls>"],
   "background": {

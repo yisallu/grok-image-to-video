@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grok 生成中…</title>
+  <style>
+    html, body {
+      margin: 0; height: 100%;
+      background: #0b0b0d; color: #eee;
+      font: 15px/1.6 -apple-system, "Segoe UI", system-ui, sans-serif;
+    }
+    .wrap {
+      min-height: 100%;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 18px; padding: 24px; box-sizing: border-box;
+    }
+    .spinner {
+      width: 54px; height: 54px;
+      border: 5px solid rgba(255,255,255,0.18);
+      border-top-color: #fff; border-radius: 50%;
+      animation: spin 0.85s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .status { font-size: 16px; text-align: center; }
+    .sub { color: #888; font-size: 13px; }
+    .thumb {
+      max-width: 220px; max-height: 220px; border-radius: 10px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.5); object-fit: cover;
+    }
+    video {
+      max-width: 96vw; max-height: 86vh; border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.6); background: #000;
+    }
+    .err {
+      max-width: 560px; background: #3a1417; border: 1px solid #b00020;
+      color: #ffd7d7; padding: 14px 18px; border-radius: 10px; text-align: center;
+    }
+    .bar {
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+      justify-content: center; margin-top: 6px;
+    }
+    a.btn, button.btn {
+      display: inline-block; padding: 8px 16px; border-radius: 8px;
+      background: #1f6feb; color: #fff; border: none; cursor: pointer;
+      font: inherit; text-decoration: none;
+    }
+    a.btn.ghost, button.btn.ghost { background: #2a2a30; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="wrap">
+    <div class="spinner" id="spinner"></div>
+    <div class="status" id="status">准备中…</div>
+    <div class="sub" id="sub"></div>
+    <img class="thumb" id="thumb" style="display:none" />
+  </div>
+  <script src="progress.js"></script>
+</body>
+</html>

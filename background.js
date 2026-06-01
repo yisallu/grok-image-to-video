@@ -22,6 +22,9 @@ async function getSettings() {
   return { ...DEFAULTS, ...s };
 }
 
+// 待处理任务:content 抓好图 → START_JOB 暂存于此 → 进度页 GET_JOB 取走
+const pendingJobs = new Map(); // jobId -> { src, pageUrl, imageDataUri, naturalWidth, naturalHeight }
+
 // ===== 并发取号(跨标签页共享,放在 background;轮询式,SW 被回收也安全)=====
 const SLOT_TTL = 10 * 60 * 1000; // 安全过期:10 分钟没释放的号自动回收
 const activeSlots = new Map(); // token -> 占用时间
@@ -245,10 +248,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true;
   }
-  if (msg?.type === "OPEN_TAB") {
-    // 在新标签页打开生成的视频(不抢占当前标签页焦点)
-    chrome.tabs.create({ url: msg.url, active: false });
-    sendResponse({ ok: true });
+  if (msg?.type === "START_JOB") {
+    // content 抓完图把任务交来:暂存 + 打开进度页新标签(进度/轮询/结果都在那)
+    const jobId = "job-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+    pendingJobs.set(jobId, msg.job);
+    chrome.tabs.create({
+      url: chrome.runtime.getURL("progress.html") + "?job=" + jobId,
+      active: true,
+    });
+    sendResponse({ ok: true, jobId });
+    return; // 同步
+  }
+  if (msg?.type === "GET_JOB") {
+    // 进度页启动后来取任务数据(取走即删,避免泄漏占内存)
+    const job = pendingJobs.get(msg.jobId) || null;
+    pendingJobs.delete(msg.jobId);
+    sendResponse({ ok: true, job });
     return; // 同步
   }
   if (msg?.type === "CAPTURE_TAB") {
