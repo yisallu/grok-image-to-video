@@ -25,39 +25,6 @@ function makeOverlay(img) {
   };
 }
 
-function replaceWithVideo(el, url) {
-  const video = document.createElement("video");
-  video.src = url;
-  video.autoplay = true;
-  video.loop = true;
-  video.muted = true;
-  video.controls = true;
-  video.playsInline = true;
-  video.className = el.className;
-  video.setAttribute("data-grok-i2v", "1");
-
-  const cs = window.getComputedStyle(el);
-  const w = el.clientWidth || el.width || 0;
-  const h = el.clientHeight || el.height || 0;
-  if (w) video.width = w;
-  if (h) video.height = h;
-  video.style.cssText = el.style.cssText;
-  video.style.maxWidth = cs.maxWidth;
-  video.style.objectFit = "cover";
-
-  // 克隆原元素(img 或 video)用于双击还原
-  const clone = el.cloneNode(true);
-  if (el instanceof HTMLImageElement) clone.src = el.currentSrc || el.src;
-  video.title = "Grok 生成视频 — 双击还原";
-  video.addEventListener("dblclick", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    video.replaceWith(clone);
-  });
-
-  el.replaceWith(video);
-}
-
 function notifyError(img, message) {
   const rect = img.getBoundingClientRect();
   const tip = document.createElement("div");
@@ -332,7 +299,8 @@ async function triggerGenerate(el, capture) {
       const d = poll.data;
       if (d.status === "done" && d.video_url) {
         overlay.remove();
-        replaceWithVideo(el, d.video_url);
+        // 在新标签页打开生成的视频(不再原位替换)
+        try { chrome.runtime.sendMessage({ type: "OPEN_TAB", url: d.video_url }); } catch (_) {}
         return;
       }
       if (["failed", "error", "expired", "cancelled"].includes(d.status)) {

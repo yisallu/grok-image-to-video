@@ -245,6 +245,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true;
   }
+  if (msg?.type === "OPEN_TAB") {
+    // 在新标签页打开生成的视频(不抢占当前标签页焦点)
+    chrome.tabs.create({ url: msg.url, active: false });
+    sendResponse({ ok: true });
+    return; // 同步
+  }
   if (msg?.type === "CAPTURE_TAB") {
     // 截当前可见标签页(渲染像素,绕开 file:///跨域/canvas 污染);需 <all_urls> 主机权限
     const windowId = sender.tab?.windowId;
