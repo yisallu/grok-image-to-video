@@ -8,7 +8,7 @@
 错误一律以 HTTP 200 + {"success": false, "error": ...} 返回,避免 Cloudflare
 把 502/504 的响应体替换成它自己的 HTML 错误页。
 
-- 监听 127.0.0.1:8799(经 Cloudflare 隧道 / nginx 反代对外提供 HTTPS)
+- 监听 127.0.0.1:8799(cloudflared 隧道 i2v.5203333.xyz 提供 TLS)
 - 鉴权:Authorization: Bearer <I2V_SECRET>
 - 零额外依赖:标准库 + venv 已有的 httpx
 
@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
+import struct
 import threading
 import time
 import uuid
@@ -42,6 +44,77 @@ def sniff_mime(b: bytes):
     if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def image_size_from_bytes(data: bytes):
+    """Return (width, height) for PNG/JPEG/WebP when headers are parseable."""
+    if data.startswith(bytes.fromhex("89504e470d0a1a0a")) and len(data) >= 24:
+        return struct.unpack(">II", data[16:24])
+    if data[:3] == b"\xff\xd8\xff":
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            while i < len(data) and data[i] == 0xFF:
+                i += 1
+            if i >= len(data):
+                break
+            marker = data[i]
+            i += 1
+            if marker in (0xD8, 0xD9):
+                continue
+            if i + 2 > len(data):
+                break
+            seg_len = struct.unpack(">H", data[i:i + 2])[0]
+            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                if i + 7 <= len(data):
+                    h = struct.unpack(">H", data[i + 3:i + 5])[0]
+                    w = struct.unpack(">H", data[i + 5:i + 7])[0]
+                    return w, h
+            i += max(seg_len, 2)
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        if data[12:16] == b"VP8X" and len(data) >= 30:
+            w = 1 + int.from_bytes(data[24:27], "little")
+            h = 1 + int.from_bytes(data[27:30], "little")
+            return w, h
+        if data[12:16] == b"VP8 " and len(data) >= 30:
+            w = struct.unpack("<H", data[26:28])[0] & 0x3FFF
+            h = struct.unpack("<H", data[28:30])[0] & 0x3FFF
+            return w, h
+        if data[12:16] == b"VP8L" and len(data) >= 25:
+            bits = int.from_bytes(data[21:25], "little")
+            w = (bits & 0x3FFF) + 1
+            h = ((bits >> 14) & 0x3FFF) + 1
+            return w, h
+    return None
+
+
+def data_uri_bytes(data_uri: str):
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:") or "," not in data_uri:
+        return None
+    header, encoded = data_uri.split(",", 1)
+    if ";base64" not in header.lower():
+        return None
+    try:
+        return base64.b64decode(encoded, validate=False)
+    except Exception:
+        return None
+
+
+def nearest_aspect_for_image(image: str):
+    data = data_uri_bytes(image)
+    if not data:
+        return None, None
+    size = image_size_from_bytes(data)
+    if not size:
+        return None, None
+    w, h = size
+    if not w or not h:
+        return None, size
+    ratio = w / h
+    aspect = min(SUPPORTED_ASPECT_RATIOS, key=lambda k: abs(SUPPORTED_ASPECT_RATIOS[k] - ratio))
+    return aspect, size
 
 
 def candidate_referers(url: str, provided: str | None):
@@ -109,9 +182,36 @@ HOST = os.environ.get("I2V_HOST", "127.0.0.1")
 PORT = int(os.environ.get("I2V_PORT", "8799"))
 
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
-DEFAULT_MODEL = "grok-imagine-video"
-VALID_ASPECT = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
+DEFAULT_MODEL = "grok-imagine-video-1.5-preview"
+SUPPORTED_ASPECT_RATIOS = {
+    "16:9": 16 / 9,
+    "3:2": 3 / 2,
+    "4:3": 4 / 3,
+    "1:1": 1.0,
+    "3:4": 3 / 4,
+    "2:3": 2 / 3,
+    "9:16": 9 / 16,
+}
+VALID_ASPECT = set(SUPPORTED_ASPECT_RATIOS)
 VALID_RES = {"480p", "720p"}
+FAILURE_STATUSES = {
+    "failed", "error", "expired", "cancelled", "canceled", "timeout", "timed_out",
+    "rejected", "blocked", "denied", "refused", "not_allowed", "disallowed",
+    "aborted", "moderation_failed", "moderation_rejected",
+    "content_policy_violation", "content_policy_error", "policy_violation",
+    "policy_rejected", "policy_blocked", "content_rejected", "content_blocked",
+    "safety_failed", "safety_rejected", "safety_violation", "safety_blocked",
+    "review_failed", "failed_review",
+}
+PROCESSING_STATUSES = {"", "queued", "pending", "processing", "running", "in_progress", "reviewing", "in_review"}
+MODERATION_KEYWORDS = (
+    "moderation_failed", "failed_moderation", "moderation_rejected",
+    "content_policy", "content policy", "policy_violation", "policy rejected", "policy blocked",
+    "safety_failed", "failed_safety", "safety_rejected", "safety_violation",
+    "review_failed", "failed_review",
+    "rejected", "blocked", "denied", "refused", "not allowed", "disallowed", "violation",
+    "审查未通过", "审查失败", "审查拒绝", "安全未通过", "安全失败", "安全拒绝", "政策", "违规", "拒绝",
+)
 
 # 任务表:request_id -> {created, result}。后台 worker 轮询 xAI、更新 result,
 # 完成后把源图+视频推到 Telegram。get_status 直接读这里(避免和 worker 重复轮询)。
@@ -123,6 +223,100 @@ def _prune_jobs():
     cutoff = time.time() - 3600
     for k in [k for k, v in JOBS.items() if v.get("created", 0) < cutoff]:
         JOBS.pop(k, None)
+
+
+def _status_text(status) -> str:
+    return str(status or "").strip().lower()
+
+
+def _compact_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _error_message(body, fallback: str = "上游返回失败") -> str:
+    if not isinstance(body, dict):
+        return _compact_text(body) or fallback
+    err = body.get("error")
+    if isinstance(err, str) and err.strip():
+        return err.strip()
+    if isinstance(err, dict):
+        for key in ("message", "reason", "code", "type", "detail", "details"):
+            value = err.get(key)
+            text = _compact_text(value).strip()
+            if text:
+                return text
+    for key in ("message", "reason", "failure_reason", "detail", "details"):
+        value = body.get(key)
+        text = _compact_text(value).strip()
+        if text:
+            return text
+    return fallback
+
+
+def _is_failure_status(status) -> bool:
+    return _status_text(status) in FAILURE_STATUSES
+
+
+def _has_error_payload(body) -> bool:
+    if not isinstance(body, dict) or "error" not in body:
+        return False
+    err = body.get("error")
+    if err in (None, ""):
+        return False
+    if isinstance(err, dict) and not err:
+        return False
+    return True
+
+
+def _is_moderation_text(text: str) -> bool:
+    haystack = str(text or "").lower()
+    return any(keyword in haystack for keyword in MODERATION_KEYWORDS)
+
+
+def _failure_signal_text(body) -> str:
+    if not isinstance(body, dict):
+        return ""
+    parts = [
+        body.get("status"),
+        body.get("message"),
+        body.get("reason"),
+        body.get("failure_reason"),
+        body.get("detail"),
+        body.get("details"),
+    ]
+    err = body.get("error")
+    if isinstance(err, dict):
+        parts.extend(err.get(k) for k in ("message", "reason", "code", "type", "detail", "details"))
+    else:
+        parts.append(err)
+    return " ".join(_compact_text(v) for v in parts if v)
+
+
+def _is_failure_result(res: dict) -> bool:
+    if not isinstance(res, dict):
+        return False
+    if res.get("success") is False:
+        return True
+    if _has_error_payload(res):
+        return True
+    if _is_failure_status(res.get("status")):
+        return True
+    return _is_moderation_text(_failure_signal_text(res))
+
+
+def _failure_result(body, status=None, fallback: str = "上游返回失败") -> dict:
+    st = _status_text(status if status is not None else (body or {}).get("status") if isinstance(body, dict) else "")
+    msg = _error_message(body, f"状态 '{st}'" if st else fallback)
+    if _is_moderation_text(f"{st} {msg}"):
+        msg = "x.ai 审查未通过:" + msg
+    return {"success": False, "status": st or "error", "error": msg}
 
 
 # ----------------------------- Telegram 推送 -----------------------------
@@ -211,7 +405,7 @@ def _worker(request_id: str, image_data_uri: str, meta: dict):
             except Exception as e:
                 log.warning("telegram 推送异常: %s", e)
             return
-        if status in {"failed", "error", "expired", "cancelled"}:
+        if _is_failure_result(res):
             return
         time.sleep(5)
     with JOBS_LOCK:
@@ -219,11 +413,118 @@ def _worker(request_id: str, image_data_uri: str, meta: dict):
             JOBS[request_id]["result"] = {"success": False, "status": "timeout", "error": "生成超时"}
 
 
+def _xai_auth_dir():
+    return os.environ.get("XAI_AUTH_DIR", "/opt/cliproxyapi/auths")
+
+
+def _list_xai_auth_files():
+    import glob
+    return sorted(glob.glob(os.path.join(_xai_auth_dir(), "xai-*.json")))
+
+
+def _jwt_exp_left(token: str) -> int:
+    try:
+        import base64, json as _json, time
+        p = token.split(".")[1]; p += "=" * (-len(p) % 4)
+        pl = _json.loads(base64.urlsafe_b64decode(p))
+        return int(pl.get("exp", 0) - time.time())
+    except Exception:
+        return 0
+
+
+def _refresh_xai_auth(path: str) -> str:
+    """用 refresh_token 刷新一个 auth 文件,成功则写回并返回新 access_token。"""
+    try:
+        import json as _json
+        d = _json.load(open(path, encoding="utf-8"))
+        rt = d.get("refresh_token")
+        te = d.get("token_endpoint") or "https://auth.x.ai/oauth2/token"
+        if not rt:
+            return ""
+        data = {"grant_type": "refresh_token", "refresh_token": rt}
+        cid = d.get("client_id") or os.environ.get("XAI_OAUTH_CLIENT_ID", "")
+        if cid:
+            data["client_id"] = cid
+        r = httpx.post(te, data=data, timeout=30)
+        if r.status_code >= 400:
+            log.warning("refresh failed %s: %s %s", os.path.basename(path), r.status_code, r.text[:120])
+            return ""
+        j = r.json()
+        at = j.get("access_token")
+        if not at:
+            return ""
+        d["access_token"] = at
+        if j.get("refresh_token"):
+            d["refresh_token"] = j["refresh_token"]
+        import time as _t
+        d["last_refresh"] = int(_t.time())
+        _json.dump(d, open(path, "w", encoding="utf-8"))
+        log.info("refreshed xai token: %s", d.get("email") or os.path.basename(path))
+        return at
+    except Exception as e:
+        log.warning("refresh error %s: %s", os.path.basename(path), e)
+        return ""
+
+
+# 记住上次成功的账号文件,优先复用(减少切换)
+_LAST_GOOD = {"path": None}
+
+
+def _candidate_token(path: str, force_refresh: bool = False) -> str:
+    """返回该 auth 文件可用的 access_token(必要时刷新);不可用返回空。"""
+    import json as _json
+    try:
+        d = _json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return ""
+    if d.get("disabled"):
+        return ""
+    tok = str(d.get("access_token") or "").strip()
+    if force_refresh or not tok or _jwt_exp_left(tok) < 120:
+        tok = _refresh_xai_auth(path) or tok
+    return tok
+
+
 def resolve_creds(force_refresh: bool = False):
-    """(token, base_url) — 优先 hermes xai-oauth,回退 XAI_API_KEY。"""
+    """(token, base_url) — 从 cliproxyapi 的 xai auth 池里选一个有额度的账号。
+    顺序:上次成功的账号 → 其余账号;自动跳过 disabled / 401 / 403(无额度)。
+    通过一次轻量 GET /models 探额度(200 才用)。全失败回退 hermes / XAI_API_KEY。
+    """
+    files = _list_xai_auth_files()
+    if _LAST_GOOD["path"] in files:
+        files = [_LAST_GOOD["path"]] + [f for f in files if f != _LAST_GOOD["path"]]
+    for path in files:
+        tok = _candidate_token(path, force_refresh=force_refresh)
+        if not tok:
+            continue
+        base = DEFAULT_BASE_URL
+        try:
+            d = __import__("json").load(open(path, encoding="utf-8"))
+            base = str(d.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
+        except Exception:
+            pass
+        try:
+            r = httpx.get(base + "/models", headers={"Authorization": "Bearer " + tok}, timeout=20)
+        except Exception:
+            continue
+        if r.status_code == 200:
+            _LAST_GOOD["path"] = path
+            return tok, base
+        if r.status_code == 401:
+            tok2 = _candidate_token(path, force_refresh=True)
+            if tok2 and tok2 != tok:
+                try:
+                    r2 = httpx.get(base + "/models", headers={"Authorization": "Bearer " + tok2}, timeout=20)
+                    if r2.status_code == 200:
+                        _LAST_GOOD["path"] = path
+                        return tok2, base
+                except Exception:
+                    pass
+        # 403(无额度)/ 其它 → 跳过,试下一个
+        log.info("skip xai account %s (/models=%s)", os.path.basename(path), r.status_code)
+    # 回退:hermes 解析器 / XAI_API_KEY
     try:
         from tools.xai_http import resolve_xai_http_credentials
-
         c = resolve_xai_http_credentials(force_refresh=force_refresh) or {}
         tok = str(c.get("api_key") or "").strip()
         base = str(c.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
@@ -270,9 +571,13 @@ def submit_job(req: dict) -> dict:
         image = ""
 
     duration = max(1, min(15, int(req.get("duration") or 6)))
-    aspect = (req.get("aspect_ratio") or "16:9").strip()
+    requested_aspect = (req.get("aspect_ratio") or req.get("aspect") or "").strip().lower()
+    auto_aspect = requested_aspect in {"", "auto", "original", "orig", "source", "原图", "原始比例"}
+    aspect, image_size = nearest_aspect_for_image(image) if auto_aspect else (requested_aspect, None)
     if aspect not in VALID_ASPECT:
         aspect = "16:9"
+    if auto_aspect and image_size:
+        log.info("auto aspect from source image %sx%s -> %s", image_size[0], image_size[1], aspect)
     resolution = (req.get("resolution") or "720p").strip().lower()
     if resolution not in VALID_RES:
         resolution = "720p"
@@ -289,7 +594,7 @@ def submit_job(req: dict) -> dict:
 
     token, base = resolve_creds()
     if not token:
-        return {"success": False, "error": "无可用 xAI 凭证(hermes OAuth 未登录且未设 XAI_API_KEY)"}
+        return {"success": False, "error": "无可用 xAI 凭证(请在 cliproxyapi auths 里放有额度的 xai oauth 账号)"}
 
     with httpx.Client() as client:
         r = client.post(
@@ -305,15 +610,24 @@ def submit_job(req: dict) -> dict:
                 json=payload, timeout=60,
             )
         if r.status_code >= 400:
-            return {"success": False, "error": f"submit failed ({r.status_code}): {r.text[:400]}"}
-        request_id = r.json().get("request_id")
+            try:
+                body = r.json()
+            except Exception:
+                body = {"error": f"submit failed ({r.status_code}): {r.text[:400]}"}
+            return _failure_result(body, fallback=f"submit failed ({r.status_code}): {r.text[:400]}")
+        submit_body = r.json()
+        if (submit_body.get("success") is False or _has_error_payload(submit_body)
+                or _is_failure_status(submit_body.get("status"))
+                or _is_moderation_text(_failure_signal_text(submit_body))):
+            return _failure_result(submit_body)
+        request_id = submit_body.get("request_id")
         if not request_id:
-            return {"success": False, "error": "响应缺少 request_id"}
+            return {"success": False, "status": "error", "error": "响应缺少 request_id"}
 
     log.info("submitted request_id=%s (%s, %s, %ss)", request_id, aspect, resolution, duration)
 
     # 注册任务 + 起后台 worker(轮询 xAI,完成后推 Telegram)
-    meta = {"aspect": aspect, "resolution": resolution, "duration": duration, "prompt": prompt}
+    meta = {"aspect": aspect, "resolution": resolution, "duration": duration, "prompt": prompt, "image_size": image_size if 'image_size' in locals() else None}
     with JOBS_LOCK:
         _prune_jobs()
         JOBS[request_id] = {"created": time.time(),
@@ -321,11 +635,13 @@ def submit_job(req: dict) -> dict:
     threading.Thread(target=_worker, args=(request_id, image, meta), daemon=True).start()
 
     return {"success": True, "request_id": request_id,
-            "resolution": resolution, "aspect_ratio": aspect, "duration": duration}
+            "resolution": resolution, "requested_resolution": resolution,
+            "aspect_ratio": aspect, "image_size": image_size if 'image_size' in locals() else None,
+            "duration": duration}
 
 
 def get_status(request_id: str) -> dict:
-    """优先返回后台 worker 写入 JOBS 的结果(纯内存读);无任务记录(如重启后)再直查 xAI。"""
+    """优先返回后台 worker 写入 JOBS 的结果;无任务记录再按后端直查。"""
     with JOBS_LOCK:
         job = JOBS.get(request_id)
     if job:
@@ -342,8 +658,12 @@ def _query_xai(request_id: str) -> dict:
         if r.status_code == 202:
             return {"success": True, "status": "processing"}
         if r.status_code >= 400:
-            return {"success": False, "status": "error",
-                    "error": f"status check failed ({r.status_code}): {r.text[:300]}"}
+            try:
+                body = r.json()
+            except Exception:
+                body = {"error": f"status check failed ({r.status_code}): {r.text[:300]}"}
+            return _failure_result(body, status="error",
+                                   fallback=f"status check failed ({r.status_code}): {r.text[:300]}")
         body = r.json()
 
     st = (body.get("status") or "").lower()
@@ -354,9 +674,9 @@ def _query_xai(request_id: str) -> dict:
         return {"success": True, "status": "done", "video_url": url,
                 "duration": (body.get("video") or {}).get("duration"),
                 "usage": body.get("usage")}
-    if st in {"failed", "error", "expired", "cancelled"}:
-        msg = (body.get("error", {}) or {}).get("message") or body.get("message") or f"状态 '{st}'"
-        return {"success": False, "status": st, "error": msg}
+    if (body.get("success") is False or _has_error_payload(body) or _is_failure_status(st)
+            or _is_moderation_text(_failure_signal_text(body))):
+        return _failure_result(body, status=st)
     return {"success": True, "status": st or "processing"}
 
 

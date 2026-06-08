@@ -28,6 +28,41 @@
     .hint { color: #888; font-size: 12px; margin-top: 4px; }
     .row { display: flex; gap: 12px; }
     .row > div { flex: 1; }
+    .setup {
+      margin-top: 20px;
+      padding-top: 12px;
+      border-top: 1px solid #e4e4e4;
+    }
+    .setup summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+      font-weight: 700;
+      list-style: none;
+    }
+    .setup summary::-webkit-details-marker { display: none; }
+    .setup summary::after {
+      content: "展开";
+      color: #666;
+      font-size: 12px;
+      font-weight: 500;
+      flex: 0 0 auto;
+    }
+    .setup[open] summary::after { content: "收起"; }
+    .setup-summary {
+      flex: 1;
+      min-width: 0;
+      color: #777;
+      font-size: 12px;
+      font-weight: 500;
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .setup-body { margin-top: 4px; }
     button {
       margin-top: 20px;
       width: 100%;
@@ -52,15 +87,30 @@
 </head>
 <body>
   <h1>Grok 图生视频</h1>
-  <div class="sub">网页上 <b>Alt + 左键点击</b> 任意图片即可生成视频,完成后原位替换。双击生成的视频可还原原图。</div>
+  <div class="sub">网页上 <b>Alt + 左键点击</b> 任意图片即可生成视频,在新标签页显示进度并播放结果。</div>
 
-  <label for="endpoint">代理地址(Endpoint)</label>
-  <input type="text" id="endpoint" placeholder="https://your-proxy.example.com/i2v" />
-  <div class="hint">VPS 上的图生视频代理,复用你的 xAI OAuth 订阅额度。</div>
+  <label for="prompt">提示词 A(左 Alt + 左键)</label>
+  <div class="histrow">
+    <select id="promptHistory">
+      <option value="">— 历史提示词(选择后填入)—</option>
+    </select>
+    <button id="delHistory" class="secondary" type="button">删除此条</button>
+  </div>
+  <textarea id="prompt" placeholder="留空 = 使用内置默认(保留主体/构图/颜色,轻微自然运动)"></textarea>
+  <div class="hint">左 Alt + 左键点击图片时使用。留空则用内置默认。保存非空提示词会自动加入历史。</div>
 
-  <label for="secret">访问密钥(Secret)</label>
-  <input type="password" id="secret" placeholder="Bearer 密钥" autocomplete="off" />
-  <div class="hint">与服务端 <code>/etc/grok-i2v/env</code> 里的 <code>I2V_SECRET</code> 一致。仅本地保存。</div>
+  <label for="promptRight">提示词 B(右 Alt + 左键)</label>
+  <div class="histrow">
+    <select id="promptHistoryRight">
+      <option value="">— 历史提示词(选择后填入)—</option>
+    </select>
+    <button id="delHistoryRight" class="secondary" type="button">删除此条</button>
+  </div>
+  <textarea id="promptRight" placeholder="留空 = 与提示词 A 相同"></textarea>
+  <div class="hint">右 Alt + 左键点击图片时使用。留空则回退用提示词 A。</div>
+
+  <button id="save" type="button">保存设置</button>
+  <div id="status"></div>
 
   <div class="row">
     <div>
@@ -95,20 +145,45 @@
   <input type="number" id="concurrency" min="1" max="10" step="1" />
   <div class="hint">点多张图时最多同时跑几个,其余自动排队。默认 3;太高易触发 xAI 限流。</div>
 
-  <label for="prompt">提示词(Prompt)</label>
-  <div class="histrow">
-    <select id="promptHistory">
-      <option value="">— 历史提示词(选择后填入)—</option>
-    </select>
-    <button id="delHistory" class="secondary" type="button">删除此条</button>
-  </div>
-  <textarea id="prompt" placeholder="留空 = 使用内置默认(保留主体/构图/颜色,轻微自然运动)"></textarea>
-  <div class="hint">留空则用内置默认。每次保存非空提示词会自动加入上方历史,最多保留 20 条。</div>
+  <label for="model">模型(Model)</label>
+  <input type="text" id="model" placeholder="grok-imagine-video-1.5-preview" />
+  <div class="hint">默认 <code>grok-imagine-video-1.5-preview</code>;也可改成接口支持的其它视频模型。</div>
 
-  <button id="save">保存设置</button>
-  <button id="test" class="secondary">测试连接</button>
-  <div id="status"></div>
+  <details id="connectionSettings" class="setup">
+    <summary>
+      <span>连接与推送配置</span>
+      <span id="setupSummary" class="setup-summary"></span>
+    </summary>
+    <div class="setup-body">
+      <label for="endpoint">接口地址(Endpoint)</label>
+      <input type="text" id="endpoint" placeholder="https://api.5203333.xyz" />
+      <div class="hint">可填 <code>https://api.5203333.xyz</code>、<code>https://api.5203333.xyz/v1</code>,或旧代理 <code>https://你的域名/i2v</code>。</div>
 
+      <label for="secret">API Key</label>
+      <input type="password" id="secret" placeholder="Bearer API Key" autocomplete="off" />
+      <div class="hint">使用 <code>api.5203333.xyz</code> 时填写它认可的 API Key;旧 <code>/i2v</code> 代理才填写 <code>I2V_SECRET</code>。</div>
+
+      <label for="telegramBotToken">Telegram Bot Token</label>
+      <input type="password" id="telegramBotToken" placeholder="留空 = 不推送 Telegram" autocomplete="off" />
+      <div class="hint">直连 <code>api.5203333.xyz</code> 时由扩展推送;旧 <code>/i2v</code> 代理仍由服务端环境变量推送。</div>
+
+      <label for="telegramChatId">Telegram Chat ID</label>
+      <input type="text" id="telegramChatId" placeholder="-100xxxxxxxxxx 或你的 chat id" />
+      <div class="hint">填写目标聊天、频道或群组 ID。Bot 需要有发送权限。</div>
+
+      <label for="archiveUrl">视频站归档地址</label>
+      <input type="text" id="archiveUrl" placeholder="https://yisal.eu.org/grok-videos" />
+      <div class="hint">留空 = 不归档。生成完成后把视频保存到你自己的网页。</div>
+
+      <label for="archiveToken">视频站归档 Token</label>
+      <input type="password" id="archiveToken" placeholder="留空 = 不归档" autocomplete="off" />
+      <div class="hint">与服务器 <code>VIDEO_ARCHIVE_TOKEN</code> 一致。</div>
+
+      <button id="test" class="secondary" type="button">测试连接</button>
+    </div>
+  </details>
+
+  <script src="config.local.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

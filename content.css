@@ -44,3 +44,95 @@
   font: 13px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
+
+.grok-i2v-prompt-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.42);
+  font: 14px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+}
+
+.grok-i2v-prompt-panel {
+  width: min(640px, 100%);
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #141414;
+  color: #f2f2f2;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.grok-i2v-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.grok-i2v-prompt-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.grok-i2v-prompt-side {
+  color: #b8b8b8;
+  font-size: 12px;
+}
+
+.grok-i2v-prompt-input {
+  display: block;
+  width: 100%;
+  min-height: 150px;
+  max-height: 45vh;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  resize: vertical;
+  background: #0b0b0b;
+  color: #fff;
+  font: 13px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif;
+  outline: none;
+}
+
+.grok-i2v-prompt-input:focus {
+  border-color: #6aa7ff;
+  box-shadow: 0 0 0 2px rgba(106, 167, 255, 0.2);
+}
+
+.grok-i2v-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.grok-i2v-prompt-btn {
+  min-width: 84px;
+  padding: 8px 12px;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  background: #242424;
+  color: #f4f4f4;
+  font: inherit;
+  cursor: pointer;
+}
+
+.grok-i2v-prompt-btn:hover { background: #303030; }
+
+.grok-i2v-prompt-primary {
+  border-color: #1f6feb;
+  background: #1f6feb;
+  color: #fff;
+  font-weight: 700;
+}
+
+.grok-i2v-prompt-primary:hover { background: #2f7df4; }

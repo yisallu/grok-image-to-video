@@ -12,6 +12,7 @@ Thumbs.db
 *.env
 *.pem
 secrets.*
+config.local.js
 
 # Python
 __pycache__/

@@ -21,17 +21,152 @@ function makeOverlay(img) {
   };
 }
 
-function notifyError(img, message) {
-  const rect = img.getBoundingClientRect();
+function pagePointFromTarget(target, fallbackX, fallbackY) {
+  if (target && typeof target.getBoundingClientRect === "function") {
+    const rect = target.getBoundingClientRect();
+    return {
+      x: rect.left + window.scrollX,
+      y: rect.top + window.scrollY,
+    };
+  }
+  return {
+    x: (Number.isFinite(fallbackX) ? fallbackX : Math.round(window.innerWidth / 2)) + window.scrollX,
+    y: (Number.isFinite(fallbackY) ? fallbackY : 24) + window.scrollY,
+  };
+}
+
+function showPageTip(x, y, text) {
   const tip = document.createElement("div");
   tip.className = "grok-i2v-error";
-  tip.textContent = "生成失败:" + message;
-  tip.style.left = `${rect.left + window.scrollX}px`;
-  tip.style.top = `${rect.top + window.scrollY}px`;
+  tip.textContent = text;
+  tip.style.left = `${Math.max(window.scrollX + 8, x)}px`;
+  tip.style.top = `${Math.max(window.scrollY + 8, y)}px`;
   document.body.appendChild(tip);
+  requestAnimationFrame(() => {
+    const maxLeft = window.scrollX + document.documentElement.clientWidth - tip.offsetWidth - 8;
+    const maxTop = window.scrollY + document.documentElement.clientHeight - tip.offsetHeight - 8;
+    tip.style.left = `${Math.max(window.scrollX + 8, Math.min(x, maxLeft))}px`;
+    tip.style.top = `${Math.max(window.scrollY + 8, Math.min(y, maxTop))}px`;
+  });
   setTimeout(() => tip.remove(), 8000);
 }
 
+function notifyError(img, message) {
+  const point = pagePointFromTarget(img);
+  showPageTip(point.x, point.y, "生成失败:" + message);
+}
+
+function notifyAtPoint(clientX, clientY, message) {
+  const point = pagePointFromTarget(null, clientX, clientY);
+  showPageTip(point.x, point.y, message);
+}
+
+function normalizeRuntimeMessageError(error) {
+  const raw = String(error?.message || error || "");
+  if (/EXTENSION_CONTEXT_INVALIDATED|context invalidated|extension context invalidated/i.test(raw)) {
+    return "扩展刚刚重新加载过,请刷新当前网页后再 Alt+点击。";
+  }
+  if (/receiving end does not exist|could not establish connection|message port closed|runtime\.lastError/i.test(raw)) {
+    return "扩展后台没有响应,请在 chrome://extensions 重新加载本扩展,然后刷新当前网页。";
+  }
+  return raw || "扩展后台未响应";
+}
+
+async function sendRuntimeMessage(payload) {
+  try {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+      throw new Error("EXTENSION_CONTEXT_INVALIDATED");
+    }
+    return await chrome.runtime.sendMessage(payload);
+  } catch (error) {
+    throw new Error(normalizeRuntimeMessageError(error));
+  }
+}
+
+function promptSideName(altSide) {
+  return altSide === "right" ? "提示词 B" : "提示词 A";
+}
+
+async function getPromptForSide(altSide) {
+  const res = await sendRuntimeMessage({ type: "GET_PROMPT", altSide });
+  if (!res || !res.ok) throw new Error(res?.error || "无法读取提示词");
+  return String(res.prompt || "");
+}
+
+function showPromptDialog(initialPrompt, altSide) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "grok-i2v-prompt-backdrop";
+
+    const panel = document.createElement("div");
+    panel.className = "grok-i2v-prompt-panel";
+
+    const head = document.createElement("div");
+    head.className = "grok-i2v-prompt-head";
+    const title = document.createElement("div");
+    title.className = "grok-i2v-prompt-title";
+    title.textContent = "调整提示词";
+    const side = document.createElement("div");
+    side.className = "grok-i2v-prompt-side";
+    side.textContent = promptSideName(altSide);
+    head.append(title, side);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "grok-i2v-prompt-input";
+    textarea.value = initialPrompt;
+    textarea.placeholder = "输入本次生成要使用的提示词";
+
+    const actions = document.createElement("div");
+    actions.className = "grok-i2v-prompt-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "grok-i2v-prompt-btn";
+    cancel.textContent = "取消";
+    const start = document.createElement("button");
+    start.type = "button";
+    start.className = "grok-i2v-prompt-btn grok-i2v-prompt-primary";
+    start.textContent = "生成视频";
+    actions.append(cancel, start);
+
+    panel.append(head, textarea, actions);
+    backdrop.appendChild(panel);
+    document.documentElement.appendChild(backdrop);
+
+    const close = (value) => {
+      document.removeEventListener("keydown", onKey, true);
+      backdrop.remove();
+      resolve(value);
+    };
+    const submit = () => close(textarea.value.trim());
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(null);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        submit();
+      }
+    };
+
+    cancel.addEventListener("click", () => close(null));
+    start.addEventListener("click", submit);
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) close(null);
+    });
+    document.addEventListener("keydown", onKey, true);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    }, 0);
+  });
+}
+
+async function savePromptForSide(altSide, prompt) {
+  const res = await sendRuntimeMessage({ type: "SAVE_PROMPT", altSide, prompt });
+  if (!res || !res.ok) throw new Error(res?.error || "提示词保存失败");
+}
 
 // 直接从已加载的 <img> 用 canvas 取图并转 JPEG data URI。
 // 适用于本地 file:// 图、同源图;跨域无 CORS 的图会污染 canvas → 返回 null 走后台抓取。
@@ -126,7 +261,7 @@ function readLocalBlob(url) {
 // 拿到视频 blob:本地 file:// 用 XHR 读;跨域 http(s) 由后台抓(SW 不受 CORS)
 async function fetchVideoBlob(src) {
   if (/^file:/.test(src)) return await readLocalBlob(src);
-  const res = await chrome.runtime.sendMessage({ type: "FETCH_VIDEO", url: src });
+  const res = await sendRuntimeMessage({ type: "FETCH_VIDEO", url: src });
   if (!res || !res.ok) throw new Error(res?.error || "无法获取视频数据");
   const bytes = Uint8Array.from(atob(res.b64), (c) => c.charCodeAt(0));
   return new Blob([bytes], { type: res.mime || "video/mp4" });
@@ -171,7 +306,7 @@ async function captureVisibleElement(el, maxSide = 1280) {
   try {
     const rect = el.getBoundingClientRect();
     if (rect.width < 10 || rect.height < 10) throw new Error("目标不在可见区域");
-    const res = await chrome.runtime.sendMessage({ type: "CAPTURE_TAB" });
+    const res = await sendRuntimeMessage({ type: "CAPTURE_TAB" });
     if (!res || !res.ok) throw new Error(res?.error || "截屏失败");
     const shot = await new Promise((resolve, reject) => {
       const im = new Image();
@@ -219,7 +354,20 @@ async function captureVideoFrame(videoEl) {
 
 // content 只负责"抓图"(canvas/视频帧/截屏都依赖原页面 DOM),抓完把任务交给 background:
 // background 打开扩展内置进度页(新标签),排队/提交/轮询/进度/结果全在新标签里完成。
-async function triggerGenerate(el, capture) {
+async function promptThenGenerate(el, capture, altSide) {
+  try {
+    const side = altSide || "left";
+    const currentPrompt = await getPromptForSide(side);
+    const prompt = await showPromptDialog(currentPrompt, side);
+    if (prompt === null) return;
+    await savePromptForSide(side, prompt);
+    await triggerGenerate(el, capture, side, prompt);
+  } catch (err) {
+    notifyError(el, String(err.message || err));
+  }
+}
+
+async function triggerGenerate(el, capture, altSide, prompt) {
   const isVideo = el instanceof HTMLVideoElement;
   const src = el.currentSrc || el.src;
   if (!src && !isVideo && !capture) { alert("无法获取图片地址"); return; }
@@ -245,7 +393,7 @@ async function triggerGenerate(el, capture) {
     }
 
     // 交给 background 开进度页;进度与结果都在新标签里
-    await chrome.runtime.sendMessage({
+    const startRes = await sendRuntimeMessage({
       type: "START_JOB",
       job: {
         src,
@@ -253,8 +401,11 @@ async function triggerGenerate(el, capture) {
         imageDataUri,
         naturalWidth: natW,
         naturalHeight: natH,
+        altSide: altSide || "left",
+        prompt,
       },
     });
+    if (!startRes || !startRes.ok) throw new Error(startRes?.error || "启动生成任务失败");
     overlay.remove(); // 原页面遮罩用完即撤,转圈交给新标签
   } catch (err) {
     overlay.remove();
@@ -297,18 +448,35 @@ function pickMediaAtPoint(x, y, target) {
   return (target instanceof HTMLImageElement || target instanceof HTMLVideoElement) ? target : null;
 }
 
+// 跟踪当前按住的是左 Alt 还是右 Alt(鼠标 click 事件只有 altKey 布尔,分不出左右)。
+// 左 Alt → 提示词 A;右 Alt → 提示词 B。
+let lastAltSide = "left";
+window.addEventListener("keydown", (e) => {
+  if (e.code === "AltLeft") lastAltSide = "left";
+  else if (e.code === "AltRight") lastAltSide = "right";
+}, true);
+
 // Alt+左键点击图片或视频(捕获阶段,优先于页面自身处理)
 // 多图轮播:切到想要的那张再 Alt+点击,抓的就是当前居中显示的那张
 // 视频:先暂停到想要的帧,再 Alt+点击,即以当前帧为源图生成
 document.addEventListener(
   "click",
   (e) => {
-    if (!e.altKey || e.button !== 0) return;
-    const el = pickMediaAtPoint(e.clientX, e.clientY, e.target);
-    if (!el) return;
-    e.preventDefault();
-    e.stopPropagation();
-    triggerGenerate(el);
+    try {
+      if (!e.altKey || e.button !== 0) return;
+      const el = pickMediaAtPoint(e.clientX, e.clientY, e.target);
+      e.preventDefault();
+      e.stopPropagation();
+      if (!el) {
+        notifyAtPoint(e.clientX, e.clientY, "没有识别到可用图片/视频,请点在可见图片或暂停的视频画面上。");
+        return;
+      }
+      promptThenGenerate(el, null, lastAltSide).catch((err) => {
+        notifyError(el, String(err.message || err));
+      });
+    } catch (err) {
+      notifyAtPoint(e.clientX, e.clientY, "Grok 插件触发失败:" + String(err.message || err));
+    }
   },
   true
 );
